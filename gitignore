@@ -1,0 +1,13 @@
+# Ignore sensitive credentials
+config.h
+secrets.h
+
+# Arduino build artifacts
+build/
+*.bin
+*.elf
+*.map
+
+# OS files
+.DS_Store
+Thumbs.db
