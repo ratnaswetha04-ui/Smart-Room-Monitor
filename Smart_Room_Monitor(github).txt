@@ -1,0 +1,236 @@
+
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <WiFi.h>
+#include "ThingSpeak.h"
+
+
+const char* WIFI_SSID       = "WIFINAME";
+const char* WIFI_PASSWORD   = "WIFIPASSWORD";
+unsigned long CHANNEL_ID    = 0;         
+const char*  WRITE_API_KEY  = "WRITEAPIKEY";
+
+#define PIR_PIN     13
+#define TRIG_PIN    5
+#define ECHO_PIN    18
+#define MQ135_PIN   34   
+
+
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+
+
+WiFiClient client;
+
+// --- Timing ---
+unsigned long lastCloudUpdate = 0;
+unsigned long lastLCDSwitch   = 0;
+const long    CLOUD_INTERVAL  = 15000; 
+const long    LCD_INTERVAL    = 3000;   
+int           lcdScreen       = 0;      
+
+// --- Sensor Data (global so LCD and cloud share same values) ---
+bool  motionDetected = false;
+int   distanceCm     = 0;
+int   airQuality     = 0;
+
+// --- Custom LCD Characters ---
+byte motionIcon[8] = { 0b00100, 0b01110, 0b00100, 0b10101, 0b00100, 0b01010, 0b01010, 0b00000 };
+byte waveIcon[8]   = { 0b00000, 0b00000, 0b01010, 0b10101, 0b10101, 0b01010, 0b00000, 0b00000 };
+
+void setup() {
+  Serial.begin(115200);
+
+  // --- Sensor Pins ---
+  pinMode(PIR_PIN,  INPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // --- LCD Init ---
+  Wire.begin(21, 22);
+  lcd.init();
+  lcd.backlight();
+  lcd.createChar(0, motionIcon);
+  lcd.createChar(1, waveIcon);
+
+  // --- Splash Screen ---
+  lcd.setCursor(0, 0);
+  lcd.print(" Smart  Room  ");
+  lcd.setCursor(0, 1);
+  lcd.print("   Monitor  v1  ");
+  delay(2000);
+  lcd.clear();
+
+  // --- Connect to WiFi ---
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting WiFi");
+  Serial.print("Connecting to WiFi");
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  lcd.clear();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Connected!");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi FAILED — running offline");
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Failed!    ");
+    lcd.setCursor(0, 1);
+    lcd.print("Offline Mode    ");
+  }
+
+  ThingSpeak.begin(client);
+  delay(2000);
+  lcd.clear();
+}
+
+
+void loop() {
+  unsigned long now = millis();
+
+
+  readAllSensors();
+
+  
+  if (now - lastLCDSwitch >= LCD_INTERVAL) {
+    lastLCDSwitch = now;
+    updateLCD();
+    lcdScreen = (lcdScreen + 1) % 3;  // Cycle through 3 screens
+  }
+
+  // --- Send to ThingSpeak every CLOUD_INTERVAL ms ---
+  if (now - lastCloudUpdate >= CLOUD_INTERVAL) {
+    lastCloudUpdate = now;
+    sendToThingSpeak();
+  }
+
+  delay(100);
+}
+
+
+//  READ ALL SENSORS
+
+void readAllSensors() {
+  // PIR
+  motionDetected = digitalRead(PIR_PIN);
+
+  // Ultrasonic
+  distanceCm = getDistance();
+
+  // MQ-135
+  airQuality = analogRead(MQ135_PIN);  // 0–4095 on ESP32 (12-bit ADC)
+
+  // Serial debug
+  Serial.printf("Motion: %s | Distance: %d cm | Air: %d\n",
+    motionDetected ? "YES" : "NO", distanceCm, airQuality);
+}
+
+
+//  ULTRASONIC DISTANCE
+
+int getDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);  // 30ms timeout
+  int  distance = duration * 0.034 / 2;
+
+  if (distance == 0 || distance > 400) return 999;  // Out of range
+  return distance;
+}
+
+
+//  LCD DISPLAY — Cycles through 3 screens
+void updateLCD() {
+  lcd.clear();
+
+  switch (lcdScreen) {
+
+    case 0:  // Screen 1: Motion + Occupancy
+      lcd.setCursor(0, 0);
+      lcd.print("Motion: ");
+      if (motionDetected) {
+        lcd.print("DETECTED");
+        lcd.write(0);  // motion icon
+      } else {
+        lcd.print("None    ");
+      }
+      lcd.setCursor(0, 1);
+      lcd.print("Room: ");
+      if (distanceCm < 100) {
+        lcd.print("Occupied  ");
+      } else {
+        lcd.print("Empty     ");
+      }
+      break;
+
+    case 1:  // Screen 2: Distance
+      lcd.setCursor(0, 0);
+      lcd.print("Distance:");
+      lcd.write(1);  // wave icon
+      lcd.setCursor(0, 1);
+      if (distanceCm == 999) {
+        lcd.print("Out of range    ");
+      } else {
+        lcd.print(distanceCm);
+        lcd.print(" cm          ");
+      }
+      break;
+
+    case 2:  // Screen 3: Air Quality
+      lcd.setCursor(0, 0);
+      lcd.print("Air Quality:    ");
+      lcd.setCursor(0, 1);
+      lcd.print(airQuality);
+      lcd.print(" - ");
+      lcd.print(getAirLabel(airQuality));
+      lcd.print("     ");
+      break;
+  }
+}
+
+//  AIR QUALITY LABEL 
+
+String getAirLabel(int val) {
+  if (val < 1000)       return "Good";
+  else if (val < 2000)  return "Moderate";
+  else if (val < 3000)  return "Poor";
+  else                  return "Danger!";
+}
+
+//  SEND DATA TO THINGSPEAK
+
+void sendToThingSpeak() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected — skipping cloud update");
+    return;
+  }
+
+  ThingSpeak.setField(1, motionDetected ? 1 : 0);
+  ThingSpeak.setField(2, distanceCm == 999 ? -1 : distanceCm);
+  ThingSpeak.setField(3, airQuality);
+
+  int response = ThingSpeak.writeFields(CHANNEL_ID, WRITE_API_KEY);
+
+  if (response == 200) {
+    Serial.println("ThingSpeak ✓ Data sent successfully");
+  } else {
+    Serial.print("ThingSpeak Error: ");
+    Serial.println(response);
+  }
+}
